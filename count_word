@@ -1,0 +1,74 @@
+import time
+import numpy as np
+from mpi4py import MPI
+from joblib import Parallel, delayed
+
+# Hàm map (đếm từ trong một chunk dữ liệu)
+def map_function(chunk):
+    word_counts = {}
+    words = chunk.split()
+    for word in words:
+        word_counts[word] = word_counts.get(word, 0) + 1
+    return word_counts
+
+# Hàm reduce (gộp kết quả từ các mapper)
+def reduce_function(data1, data2):
+    combined = data1.copy()
+    for key, value in data2.items():
+        combined[key] = combined.get(key, 0) + value
+    return combined
+
+# Khởi tạo MPI
+comm = MPI.COMM_WORLD
+rank = comm.Get_rank()
+size = comm.Get_size()
+
+# Tạo dữ liệu
+def generate_data(num_lines):
+    return ["Welcome to our presentation."] * num_lines
+
+# Đánh giá hiệu năng
+def evaluate_performance(num_lines):
+    input_data = generate_data(num_lines)
+
+    # Chia dữ liệu cho các tiến trình
+    chunk_size = len(input_data) // size
+    chunks = [input_data[i * chunk_size:(i + 1) * chunk_size] for i in range(size)]
+    if len(input_data) % size != 0:
+        chunks[-1].extend(input_data[size * chunk_size:])
+
+    chunk = comm.scatter(chunks, root=0)
+
+    start_time_map = time.time()
+    results = Parallel(n_jobs=size)(delayed(map_function)(chunk) for chunk in chunks)
+    end_time_map = time.time()
+
+    local_word_counts = reduce_function({}, results[rank])
+    global_word_counts = comm.reduce(local_word_counts, op=reduce_function, root=0)
+    end_time_reduce = time.time()
+
+    if rank == 0:
+        total_time = end_time_reduce - start_time_map
+        map_time = end_time_map - start_time_map
+        reduce_time = end_time_reduce - end_time_map
+        total_words = sum(global_word_counts.values())
+        wps = total_words / total_time if total_time > 0 else 0
+        return {
+            'num_lines': num_lines,
+            'map_time': map_time,
+            'reduce_time': reduce_time,
+            'total_time': total_time,
+            'wps': wps
+        }
+    return None
+
+# In kết quả
+if rank == 0:
+    for num_lines in [1000, 1000000, 1000000000]:
+        result = evaluate_performance(num_lines)
+        print(f"Số dòng: {result['num_lines']}")
+        print(f"Thời gian Map: {result['map_time']:.5f} giây")
+        print(f"Thời gian Reduce: {result['reduce_time']:.5f} giây")
+        print(f"Thời gian Tổng: {result['total_time']:.5f} giây")
+        print(f"WPS: {result['wps']:.2f}")
+        print('-' * 50)
