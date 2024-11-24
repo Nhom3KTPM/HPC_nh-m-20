@@ -2,11 +2,12 @@ import time
 import numpy as np
 from mpi4py import MPI
 from joblib import Parallel, delayed
+import pandas as pd
 
 # Hàm map (đếm từ trong một chunk dữ liệu)
 def map_function(chunk):
     word_counts = {}
-    words = chunk.split()
+    words = list(("".join(chunk)).split())
     for word in words:
         word_counts[word] = word_counts.get(word, 0) + 1
     return word_counts
@@ -18,57 +19,82 @@ def reduce_function(data1, data2):
         combined[key] = combined.get(key, 0) + value
     return combined
 
-# Khởi tạo MPI
-comm = MPI.COMM_WORLD
-rank = comm.Get_rank()
-size = comm.Get_size()
+# Chạy tuần tự
+def sequential_word_count(data):
+    start_time = time.time()
+    word_counts = {}
+    words = list(("".join(data)).split())
+    for word in words:
+        word_counts[word] = word_counts.get(word, 0) + 1
+    end_time = time.time()
+    return end_time - start_time, word_counts
 
 # Tạo dữ liệu
 def generate_data(num_lines):
     return ["Welcome to our presentation."] * num_lines
 
+
 # Đánh giá hiệu năng
-def evaluate_performance(num_lines):
+def evaluate_performance(num_lines, use_mapreduce=True):
     input_data = generate_data(num_lines)
 
-    # Chia dữ liệu cho các tiến trình
-    chunk_size = len(input_data) // size
-    chunks = [input_data[i * chunk_size:(i + 1) * chunk_size] for i in range(size)]
-    if len(input_data) % size != 0:
-        chunks[-1].extend(input_data[size * chunk_size:])
+    if use_mapreduce:
+        # Khởi tạo MPI
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
 
-    chunk = comm.scatter(chunks, root=0)
+        # Chia dữ liệu cho các tiến trình
+        chunk_size = len(input_data) // size
+        chunks = [input_data[i * chunk_size:(i + 1) * chunk_size] for i in range(size)]
+        if len(input_data) % size != 0:
+            chunks[-1].extend(input_data[size * chunk_size:])
 
-    start_time_map = time.time()
-    results = Parallel(n_jobs=size)(delayed(map_function)(chunk) for chunk in chunks)
-    end_time_map = time.time()
+        chunk = comm.scatter(chunks, root=0)
 
-    local_word_counts = reduce_function({}, results[rank])
-    global_word_counts = comm.reduce(local_word_counts, op=reduce_function, root=0)
-    end_time_reduce = time.time()
+        start_time_map = time.time()
+        results = Parallel(n_jobs=size)(delayed(map_function)(chunk) for chunk in chunks)
+        end_time_map = time.time()
+
+        local_word_counts = reduce_function({}, results[rank])
+        global_word_counts = comm.reduce(local_word_counts, op=reduce_function, root=0)
+        end_time_reduce = time.time()
+
+        if rank == 0:
+            total_time = end_time_reduce - start_time_map
+            map_time = end_time_map - start_time_map
+            reduce_time = end_time_reduce - end_time_map
+            return  map_time, reduce_time, total_time
+        return None
+
+    else: # Sequential
+        seq_time, word_counts = sequential_word_count(input_data)
+        return 0, 0, seq_time
+
+
+
+if __name__ == "__main__":
+    # Khởi tạo MPI (cần thiết cả khi chạy tuần tự để kiểm tra rank)
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
 
     if rank == 0:
-        total_time = end_time_reduce - start_time_map
-        map_time = end_time_map - start_time_map
-        reduce_time = end_time_reduce - end_time_map
-        total_words = sum(global_word_counts.values())
-        wps = total_words / total_time if total_time > 0 else 0
-        return {
-            'num_lines': num_lines,
-            'map_time': map_time,
-            'reduce_time': reduce_time,
-            'total_time': total_time,
-            'wps': wps
-        }
-    return None
+        n_values = [100, 1000, 10000, 100000]
+        results = []
 
-# In kết quả
-if rank == 0:
-    for num_lines in [1000, 1000000, 1000000000]:
-        result = evaluate_performance(num_lines)
-        print(f"Số dòng: {result['num_lines']}")
-        print(f"Thời gian Map: {result['map_time']:.5f} giây")
-        print(f"Thời gian Reduce: {result['reduce_time']:.5f} giây")
-        print(f"Thời gian Tổng: {result['total_time']:.5f} giây")
-        print(f"WPS: {result['wps']:.2f}")
-        print('-' * 50)
+        for n in n_values:
+            map_time_mr, reduce_time_mr, total_time_mr = evaluate_performance(n, use_mapreduce=True)
+            map_time_seq, reduce_time_seq, total_time_seq = evaluate_performance(n, use_mapreduce=False)
+
+            results.append({
+                "N": n,
+                "Map Time (MR)": map_time_mr,
+                "Reduce Time (MR)": reduce_time_mr,
+                "Total Time (MR)": total_time_mr,
+                "Sequential Time": total_time_seq
+            })
+            
+        df = pd.DataFrame(results)
+        print(df)
+
+    MPI.Finalize()  # Đảm bảo gọi MPI.Finalize() sau khi hoàn thành
